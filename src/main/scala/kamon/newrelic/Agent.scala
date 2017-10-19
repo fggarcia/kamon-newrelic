@@ -16,12 +16,9 @@
 
 package kamon.newrelic
 
-import akka.actor.{Actor, ActorLogging, ActorRef}
-import akka.event.LoggingAdapter
-import akka.util.Timeout
 import com.typesafe.config.Config
-import kamon.Kamon
-import kamon.metric.{MetricsModule, SegmentMetrics, TickMetricSnapshotBuffer, TraceMetrics}
+import kamon.{Kamon, MetricReporter}
+import kamon.metric._
 import spray.json._
 
 import scala.concurrent.Future
@@ -31,13 +28,72 @@ import java.lang.management.ManagementFactory
 import kamon.util.ConfigTools.Syntax
 import Agent._
 import JsonProtocol._
-import akka.pattern.pipe
+import org.slf4j.LoggerFactory
 
+import scala.collection.concurrent.TrieMap
 import scala.concurrent.duration._
 import scala.concurrent.duration.FiniteDuration
 
 trait KamonNewRelicClient {
   def getNRClient(): NewRelicClient = new ScalaJClient()
+}
+
+class NewRelicReporter extends MetricReporter with KamonNewRelicClient {
+  private val logger = LoggerFactory.getLogger(classOf[NewRelicReporter])
+  private val counters = TrieMap.empty[MetricKey, CumulativeValue]
+  private val histograms = TrieMap.empty[MetricKey, CumulativeDistribution]
+
+  var nrClient: Option[NewRelicClient] = None
+
+  override def reportTickSnapshot(snapshot: TickSnapshot): Unit = {
+    snapshot.metrics.counters.foreach(accumulateValue(this.counters, _))
+    snapshot.metrics.histograms.foreach(accumulateDistribution(this.histograms, _))
+    snapshot.metrics.minMaxCounters.foreach(accumulateDistribution(this.histograms, _))
+  }
+
+  override def start(): Unit = {
+    nrClient = Some(getNRClient())
+  }
+
+  override def stop(): Unit = {
+
+  }
+
+  override def reconfigure(config: Config): Unit = {
+
+  }
+
+  private def accumulateValue(target: TrieMap[MetricKey, CumulativeValue], metric: MetricValue): Unit =
+    target.getOrElseUpdate(MetricKey(metric.name, metric.tags, metric.unit), new CumulativeValue(metric)).add(metric)
+
+  private def accumulateDistribution(target: TrieMap[MetricKey, CumulativeDistribution], metric: MetricDistribution): Unit =
+    target.getOrElseUpdate(MetricKey(metric.name, metric.tags, metric.unit), new CumulativeDistribution(metric)).add(metric)
+
+
+  private case class MetricKey(name: String, tags: Map[String, String], unit: MeasurementUnit)
+
+  private class CumulativeDistribution(initialDistribution: MetricDistribution) {
+    private val accumulator = new DistributionAccumulator(initialDistribution.dynamicRange)
+
+    def add(metric: MetricDistribution): Unit =
+      this.accumulator.add(metric.distribution)
+
+    def snapshot(): MetricDistribution =
+      initialDistribution.copy(distribution = this.accumulator.result(resetState = false))
+  }
+
+  private class CumulativeValue(initialValue: MetricValue) {
+    private var value = 0L
+
+    def add(metric: MetricValue): Unit =
+      this.value += metric.value
+
+    def snapshot(): MetricValue = {
+      val snapshot = initialValue.copy(value = this.value)
+      this.value = 0L
+      snapshot
+    }
+  }
 }
 
 class Agent extends Actor with ActorLogging with MetricsSubscription with KamonNewRelicClient {
@@ -50,7 +106,7 @@ class Agent extends Actor with ActorLogging with MetricsSubscription with KamonN
   val nrClient = getNRClient()
 
   // Start the reporters
-  private val reporter = context.actorOf(MetricReporter.props(agentSettings), "metric-reporter")
+  private val reporter = context.actorOf(MetricReporter2.props(agentSettings), "metric-reporter")
 
   val metricsSubscriber = {
     val tickInterval = Kamon.metrics.settings.tickInterval
@@ -142,8 +198,8 @@ object Agent {
   case class ConnectFailed(reason: Throwable) extends ConnectResult
 }
 
-case class AgentSettings(licenseKey: String, appName: String, hostname: String, pid: Int, operationTimeout: Timeout,
-  maxConnectionRetries: Int, retryDelay: FiniteDuration, apdexT: Double, ssl: Boolean)
+case class AgentSettings(licenseKey: String, appName: String, hostname: String, pid: Int, operationTimeout: Duration,
+  maxConnectionRetries: Int, retryDelay: Duration, apdexT: Double, ssl: Boolean)
 
 object AgentSettings {
 
@@ -160,10 +216,10 @@ object AgentSettings {
       newRelicConfig.getString("app-name"),
       runtimeName(1),
       runtimeName(0).toInt,
-      Timeout(newRelicConfig.getFiniteDuration("operation-timeout")),
+      newRelicConfig.getDuration("operation-timeout"),
       newRelicConfig.getInt("max-connect-retries"),
-      newRelicConfig.getFiniteDuration("connect-retry-delay"),
-      newRelicConfig.getFiniteDuration("apdexT").toMillis / 1E3D,
+      newRelicConfig.getDuration("connect-retry-delay"),
+      newRelicConfig.getDuration("apdexT").toMillis / 1E3D,
       ssl)
   }
 }

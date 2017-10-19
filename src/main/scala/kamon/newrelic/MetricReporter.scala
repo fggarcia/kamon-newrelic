@@ -27,7 +27,7 @@ import kamon.newrelic.MetricReporter.{PostFailed, PostSucceeded}
 import JsonProtocol._
 import spray.json._
 
-class MetricReporter(settings: AgentSettings) extends Actor with ActorLogging with KamonNewRelicClient {
+class MetricReporter2(settings: AgentSettings) extends Actor with ActorLogging with KamonNewRelicClient {
   import context.dispatcher
 
   private val config = context.system.settings.config
@@ -97,8 +97,8 @@ class MetricReporter(settings: AgentSettings) extends Actor with ActorLogging wi
 
 }
 
-object MetricReporter {
-  def props(settings: AgentSettings): Props = Props(new MetricReporter(settings))
+object MetricReporter2 {
+  def props(settings: AgentSettings): Props = Props(new MetricReporter2(settings))
 
   sealed trait MetricDataPostResult
   case object PostSucceeded extends MetricDataPostResult
